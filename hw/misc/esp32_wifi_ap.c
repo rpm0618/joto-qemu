@@ -38,8 +38,8 @@
 // 50ms between beacons
 #define BEACON_TIME 50000000
 #define INTER_FRAME_TIME 5000000
-#define DEBUG 1
-#define DEBUG_DUMPFRAMES 1
+#define DEBUG 0
+#define DEBUG_DUMPFRAMES 0
 
 // channel 12, 13 and 14 aren't scanned with probe requests, but by listening to beacons
 // likely because those channels aren't freely licensed in all countries

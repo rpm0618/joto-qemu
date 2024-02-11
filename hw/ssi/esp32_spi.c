@@ -157,12 +157,29 @@ static void esp32_spi_txrx_buffer(Esp32SpiState *s, void *buf, int tx_bytes, int
     uint8_t *c_buf = (uint8_t*) buf;
     for (int i = 0; i < bytes; ++i) {
         uint8_t byte = 0;
-        if (byte < tx_bytes) {
+        if (i < tx_bytes) {
             memcpy(&byte, c_buf + i, 1);
         }
         uint32_t res = ssi_transfer(s->spi, byte);
-        if (byte < rx_bytes) {
+        if (i < rx_bytes) {
             memcpy(c_buf + i, &res, 1);
+        }
+    }
+}
+
+// rpm0618 SPI Read transaction, but accounts for (skips) the dummy byte returned
+// by the SPI flash emulation
+static void esp32_spi_rx_buffer_skip(Esp32SpiState *s, void *buf, int rx_bytes)
+{
+    int bytes = rx_bytes + 1; // Read an extra byte to account for the skipped dummy byte
+    uint8_t *c_buf = (uint8_t*) buf;
+    for (int i = 0; i < bytes; ++i) {
+        uint8_t byte = 0;
+        uint32_t res = ssi_transfer(s->spi, byte);
+        if (i == 0) { // Skip the dummy byte
+            continue;
+        } else {
+            memcpy(c_buf + i - 1, &res, 1);
         }
     }
 }
@@ -180,6 +197,17 @@ static void esp32_spi_transaction(Esp32SpiState *s, Esp32SpiTransaction *t)
     esp32_spi_txrx_buffer(s, &t->cmd, t->cmd_bytes, 0);
     esp32_spi_txrx_buffer(s, &t->addr, t->addr_bytes, 0);
     esp32_spi_txrx_buffer(s, t->data, t->data_tx_bytes, t->data_rx_bytes);
+    esp32_spi_cs_set(s, 1);
+}
+
+// rpm0618 Perform a "continuation" read, which in this case means skipping the dummy byte
+// produced by SPI flash emulation layer
+static void esp32_spi_read_ctn_transaction(Esp32SpiState *s, Esp32SpiTransaction *t)
+{
+    esp32_spi_cs_set(s, 0);
+    esp32_spi_txrx_buffer(s, &t->cmd, t->cmd_bytes, 0);
+    esp32_spi_txrx_buffer(s, &t->addr, t->addr_bytes, 0);
+    esp32_spi_rx_buffer_skip(s, t->data, t->data_rx_bytes);
     esp32_spi_cs_set(s, 1);
 }
 
@@ -202,6 +230,7 @@ static void esp32_spi_do_command(Esp32SpiState* s, uint32_t cmd_reg)
     Esp32SpiTransaction t = {
         .cmd_bytes = 1
     };
+    bool read_ctn = false; // rpm0618
     switch (cmd_reg) {
     case R_SPI_CMD_READ_MASK:
         t.cmd = CMD_READ;
@@ -293,11 +322,48 @@ static void esp32_spi_do_command(Esp32SpiState* s, uint32_t cmd_reg)
             t.data = &s->data_reg[0];
             t.data_rx_bytes = bitlen_to_bytes(s->miso_dlen_reg);
         }
+        // rpm0618 Custom command translation for external flash.
+        // MGOS VFS doesn't use the SPI controller for the external SPI flash in the same way as
+        // it does the internal. For the external flash, it bypasses most of the functionality of
+        // the SPI controller, instead opting to manually send the command and address bytes itself.
+        // We also need to handle what I'm calling "continutation" reads, where multiple read
+        // requests for the same address in a row are meant to continue reading from where the last
+        // request left off.
+        if (t.cmd == 0) {
+            t.cmd = s->data_reg[8] & 0xff; // data_reg[8] is the start of the send buffer (esp32 trm 7.3.4)
+            t.cmd_bytes = 1;
+            if (t.cmd == 0xb) { // 0xb = read
+                uint32_t addr = bswap32(s->data_reg[8] & 0xffffff00);
+
+                // Detect if this is the new read
+                if (t.data_tx_bytes > 0 || addr != s->prev_addr) {
+                    s->read_offset = 0;
+                }
+                s->prev_addr = addr;
+
+                t.addr = bswap32(addr + s->read_offset) >> 8;
+                t.addr_bytes = 3;
+
+                if (s->read_offset > 0 && t.data_rx_bytes > 0) {
+                    read_ctn = true;
+                    s->read_offset += t.data_rx_bytes;
+                } else if (t.data_rx_bytes > 0) {
+                    // the first byte in a read is a dummy byte, so the first chunk of a continuation read
+                    // always returns one less data byte than requested
+                    s->read_offset += t.data_rx_bytes - 1;
+                }
+            }
+        }
         break;
     default:
         return;
     }
-    esp32_spi_transaction(s, &t);
+
+    if (read_ctn) {
+        esp32_spi_read_ctn_transaction(s, &t);
+    } else {
+        esp32_spi_transaction(s, &t);
+    }
 }
 
 

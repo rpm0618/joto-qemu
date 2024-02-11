@@ -19,6 +19,10 @@ typedef struct Esp32SpiState {
     int num_cs;
     SSIBus *spi;
 
+    // rpm0618
+    size_t read_offset;
+    uint32_t prev_addr;
+
     uint32_t addr_reg;
     uint32_t ctrl_reg;
     uint32_t status_reg;

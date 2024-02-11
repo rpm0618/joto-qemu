@@ -355,6 +355,10 @@ static const FlashPartInfo known_devices[] = {
       .sfdp_read = m25p80_sfdp_w25q512jv },
     { INFO("w25q01jvq",   0xef4021,      0,  64 << 10, 2048, ER_4K),
       .sfdp_read = m25p80_sfdp_w25q01jvq },
+
+
+    // rpm0618 0xbf2641 is the correct JEDEC ID, modifying to pass size detection checks in mgos_vfs_dev_spi_flash.c
+    { INFO("sst26vf016b", 0xbf2015,      0,  64 << 10,  32, 0) },
 };
 
 typedef enum {

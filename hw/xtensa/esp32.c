@@ -36,6 +36,7 @@
 #include "sysemu/blockdev.h"
 #include "sysemu/block-backend.h"
 #include "exec/exec-all.h"
+#include "exec/address-spaces.h"
 #include "net/net.h"
 #include "elf.h"
 
@@ -82,6 +83,33 @@ static const struct MemmapEntry {
 #define ESP32_SOC_RESET_ALL       (ESP32_SOC_RESET_RTC | ESP32_SOC_RESET_DIG)
 
 
+// rpm0618, emulate SRAM1's weird data and instruction bus remapping (esp32 trm 1.3.2.4)
+static uint64_t iram1_mmio_read(void* opaque, hwaddr addr, unsigned int size) {
+    hwaddr word_offset = 0xfffffffc & addr;
+    hwaddr byte_offset = 0x3 & addr;
+    hwaddr inverse_offset = 0x1fffc - word_offset + byte_offset;
+    hwaddr inverse_addr = 0x3ffe0000 + inverse_offset;
+    uint64_t data = 0;
+    address_space_read(&address_space_memory, inverse_addr, MEMTXATTRS_UNSPECIFIED, &data, size);
+    return data;
+}
+static void iram1_mmio_write(void* opaque, hwaddr addr, uint64_t value, unsigned int size) {
+    if (size != 4 && (addr & 0xfffffffc) != 0) {
+        fprintf(stderr, "UNALIGNED IRAM1 WRITE %lx, %lu, size %u IGNORING\n", addr, value, size);
+        return;
+    }
+    hwaddr word_offset = 0xfffffffc & addr;
+    hwaddr byte_offset = 0x3 & addr;
+    hwaddr inverse_offset = 0x1fffc - word_offset + byte_offset;
+    hwaddr inverse_addr = 0x3ffe0000 + inverse_offset;
+    address_space_write(&address_space_memory, inverse_addr, MEMTXATTRS_UNSPECIFIED, &value, size);
+}
+static const MemoryRegionOps esp32_iram1_ops = {
+    .read =  iram1_mmio_read,
+    .write = iram1_mmio_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl.unaligned = false
+};
 
 
 static void remove_cpu_watchpoints(XtensaCPU* xcs)
@@ -312,6 +340,11 @@ static void esp32_soc_realize(DeviceState *dev, Error **errp)
     memory_region_init_ram(iram, NULL, "esp32.iram",
                            memmap[ESP32_MEMREGION_IRAM].size, &error_fatal);
     memory_region_add_subregion(sys_mem, memmap[ESP32_MEMREGION_IRAM].base, iram);
+
+    // rpm0618
+    MemoryRegion *iram1 = g_new(MemoryRegion, 1);
+    memory_region_init_io(iram1, NULL, &esp32_iram1_ops, NULL, "esp32.iram1", 0x20000);
+    memory_region_add_subregion_overlap(sys_mem, 0x400A0000, iram1, 100);
 
     memory_region_init_ram(icache0, NULL, "esp32.icache0",
                            memmap[ESP32_MEMREGION_ICACHE0].size, &error_fatal);
@@ -745,6 +778,18 @@ static void esp32_machine_init_spi_flash(Esp32SocState *ss, BlockBackend* blk)
                                 qdev_get_gpio_in_named(flash_dev, SSI_GPIO_CS, 0));
 }
 
+// rpm0618
+static void joto_machine_init_external_spi_flash(Esp32SocState *ss, BlockBackend* blk)
+{
+    DeviceState* spi_master = DEVICE(&ss->spi[3]);
+    BusState* spi_bus = qdev_get_child_bus(spi_master, "spi");
+
+    DeviceState* flash_dev = qdev_new("sst26vf016b");
+    qdev_prop_set_drive(flash_dev, "drive", blk);
+    qdev_realize_and_unref(flash_dev, spi_bus, &error_fatal);
+    qdev_connect_gpio_out_named(spi_master, SSI_GPIO_CS, 0, qdev_get_gpio_in_named(flash_dev, SSI_GPIO_CS, 0));
+}
+
 static void esp32_machine_init_psram(Esp32SocState *ss, uint32_t size_mbytes)
 {
     /* PSRAM attached to SPI1, CS1 */
@@ -832,6 +877,16 @@ static void esp32_machine_init(MachineState *machine)
         qemu_log("Not initializing SPI Flash\n");
     }
 
+    // rpm0618
+    BlockBackend* external_blk = NULL;
+    DriveInfo* external_dinfo = drive_get(IF_MTD, 1, 1);
+    if (external_dinfo) {
+        qemu_log("Adding External SPI flash\n");
+        external_blk = blk_by_legacy_dinfo(external_dinfo);
+    } else {
+        qemu_log("Not adding External SPI flash\n");
+    }
+
     Esp32MachineState *ms = ESP32_MACHINE(machine);
     object_initialize_child(OBJECT(ms), "soc", &ms->esp32, TYPE_ESP32_SOC);
     Esp32SocState *ss = ESP32_SOC(&ms->esp32);
@@ -850,6 +905,12 @@ static void esp32_machine_init(MachineState *machine)
 
     if (blk) {
         esp32_machine_init_spi_flash(ss, blk);
+    }
+
+    // rpm0618
+    if (external_blk) {
+        qemu_log("Actually Adding External SPI Flash\n");
+        joto_machine_init_external_spi_flash(ss, external_blk);
     }
 
     if (machine->ram_size > 0) {

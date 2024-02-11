@@ -101,7 +101,13 @@ static uint64_t uart_read(void *opaque, hwaddr addr, unsigned int size)
          * in the FIFO. 128 is a special case — write and read pointers should be
          * the same in this case.
          */
-        r = FIELD_DP32(0, UART_MEM_RX_STATUS, WR_ADDR, (fifo_size == 128) ? 0 : fifo_size);
+        // rpm0618
+        // The above comment is not true for MongooseOS. Specifically it watches the RD_ADDR field for changes
+        // to see when a byte has been read. To get around emulating the full ring buffer, we fudge by offsetting
+        // the addresses back and forth everytime a byte has been read, passing the change check
+        uint32_t offset = fifo_size % 2;
+        r = FIELD_DP32(r, UART_MEM_RX_STATUS, WR_ADDR, (fifo_size == 128) ? 0 : fifo_size + offset);
+        r = FIELD_DP32(r, UART_MEM_RX_STATUS, RD_ADDR, (fifo_size == 128) ? 0 : offset);
         }
         break;
     case A_UART_DATE:
