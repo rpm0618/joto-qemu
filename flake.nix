@@ -13,21 +13,18 @@
                 inherit system;
             };
             buildOnlyPackages = with pkgs; [
-                pkg-config flex bison ninja python3
+                pkg-config
+                flex
+                bison
+                ninja
+                python3
             ];
             runtimePackages = with pkgs; [
-                # git
-                # wget
-                # flex
-                # bison
                 gperf
                 glib
                 pixman
                 libgcrypt
                 libslirp
-                # ninja
-                # pkg-config
-                # python3
             ];
         in {
             devShells.default = pkgs.mkShell {
@@ -52,7 +49,14 @@
                     "--disable-gtk"
                 ];
                 buildPhase = "ninja -C build";
-                installPhase = "mkdir -p $out/bin; cp build/qemu-system-xtensa $out/bin/";
+                # installPhase = "mkdir -p $out/bin; cp build/qemu-system-xtensa $out/bin/";
+                installPhase = ''
+                    mkdir -p $out/bin
+                    mkdir -p $out/share/qemu-firmware
+                    cp build/qemu-system-xtensa $out/bin/
+                    cp pc-bios/esp32-v3-rom.bin $out/share/qemu-firmware/
+                    cp pc-bios/esp32-v3-rom-app.bin $out/share/qemu-firmware/
+                '';
             };
         });
 }
